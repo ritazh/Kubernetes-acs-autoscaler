@@ -32,6 +32,7 @@ DEBUG_LOGGING_MAP = {
               help='Full path to the ARM template file. Needed only if running on acs-engine (and not ACS).')
 @click.option("--template-file-url", default=None,
               help='URL to the ARM template file. Needed only if running on acs-engine (and not ACS).')
+@click.option("--bypass-sla", is_flag=True, help='WARNING, by enabling this flag you will void the SLA of your ACS cluster. This flags improves the scaling down process. No effect on acs-engine clusters.')
 @click.option("--over-provision", default=5)
 #how soon after a node becomes idle should we terminate it?
 @click.option("--idle-threshold", default=600)
@@ -61,7 +62,7 @@ DEBUG_LOGGING_MAP = {
 @click.option("--debug", is_flag=True) 
 def main(container_service_name, resource_group, sleep, kubeconfig,
          service_principal_app_id, service_principal_secret, service_principal_tenant_id,
-         datadog_api_key,idle_threshold, spare_agents,
+         datadog_api_key,idle_threshold, spare_agents, bypass_sla,
          template_file, parameters_file, template_file_url, parameters_file_url,
          over_provision, instance_init_time, no_scale, no_maintenance,
          slack_hook, slack_bot_token, dry_run, verbose, debug):
@@ -105,6 +106,7 @@ def main(container_service_name, resource_group, sleep, kubeconfig,
                       idle_threshold=idle_threshold,
                       instance_init_time=instance_init_time,
                       spare_agents=spare_agents,
+                      bypass_sla=bypass_sla,
                       container_service_name=container_service_name,
                       resource_group=resource_group,
                       scale_up=not no_scale,

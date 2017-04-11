@@ -49,7 +49,7 @@ class Cluster(object):
 
     def __init__(self, service_principal_app_id, service_principal_secret, service_principal_tenant_id,
                  kubeconfig, template_file, parameters_file, template_file_url, parameters_file_url,
-                 idle_threshold, spare_agents, instance_init_time, 
+                 idle_threshold, spare_agents, instance_init_time, bypass_sla,
                  container_service_name, resource_group, notifier,
                  scale_up=True, maintainance=True,
                  datadog_api_key=None,
@@ -63,9 +63,14 @@ class Cluster(object):
             # for using on kube
             logger.debug('Using kube service account')
             self.api = pykube.HTTPClient(
-                pykube.KubeConfig.from_service_account())       
+                pykube.KubeConfig.from_service_account())  
+
+        is_acs_engine = False
+        self.arm_template = None
+        self.arm_parameters = None
 
         if template_file or template_file_url:
+            is_acs_engine = True
             self.arm_template = utils.get_arm_template(template_file, template_file_url)
             self.arm_parameters = utils.get_arm_parameters(parameters_file, parameters_file_url)
       
@@ -74,6 +79,9 @@ class Cluster(object):
         self.resource_group = resource_group
         self.agent_pools = {}
         self.pools_instance_type = {}
+
+        #acs-engine has no SLA
+        self.bypass_sla = bypass_sla or is_acs_engine
 
         # config
         self.idle_threshold = idle_threshold
@@ -374,7 +382,7 @@ class Cluster(object):
 
                 #With ACS, if we don't want to break the SLA, we can only kill nodes starting by the most recent
                 #With acs-engine, we can directly delete any node using Azure API
-                if trim_ended and not container_service.is_acs_engine:
+                if trim_ended and not self.bypass_sla:
                     continue
 
                 #DataDog
@@ -388,7 +396,7 @@ class Cluster(object):
                             ClusterNodeState.SPARE_AGENT):                       
                     # do nothing
                     trim_ended = True
-                elif state == ClusterNodeState.UNDER_UTILIZED_DRAINABLE and (not trim_ended or container_service.is_acs_engine):
+                elif state == ClusterNodeState.UNDER_UTILIZED_DRAINABLE and (not trim_ended or self.bypass_sla):
                     if not self.dry_run:
                         node.cordon()
                         node.drain(pods_by_node.get(node.name, []),
@@ -409,10 +417,9 @@ class Cluster(object):
                         logger.info('[Dry run] Would have uncordoned %s', node)
                     trim_ended = True
                 elif state == ClusterNodeState.IDLE_UNSCHEDULABLE:
-                    # remove it from asg
                     if not self.dry_run:
                         nodes_to_trim += 1
-                        if container_service.is_acs_engine:
+                        if self.bypass_sla:
                             container_service.delete_node(node)
                     else:
                         logger.info('[Dry run] Would have scaled in %s', node)
@@ -423,5 +430,5 @@ class Cluster(object):
                     raise Exception("Unhandled state: {}".format(state))
             trim_map[pool.name] = nodes_to_trim
         
-        if not container_service.is_acs_engine and len(list(filter(lambda x: trim_map[x] > 0, trim_map))) > 0:
+        if not self.bypass_sla and len(list(filter(lambda x: trim_map[x] > 0, trim_map))) > 0:
             container_service.scale_down(trim_map, self.dry_run)
