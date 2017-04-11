@@ -64,10 +64,12 @@ class Cluster(object):
             logger.debug('Using kube service account')
             self.api = pykube.HTTPClient(
                 pykube.KubeConfig.from_service_account())       
-
+        
+        self.is_acs_engine = False
         if template_file or template_file_url:
             self.arm_template = utils.get_arm_template(template_file, template_file_url)
             self.arm_parameters = utils.get_arm_parameters(parameters_file, parameters_file_url)
+            self.is_acs_engine = True           
       
         self._drained = {}
         self.container_service_name = container_service_name
@@ -284,7 +286,10 @@ class Cluster(object):
                           node.capacity - utilization).possible
         drainable = not undrainable_list
 
-        spare_capacity = node.instance_index < self.spare_agents
+        # if not self.is_acs_engine:
+        #     spare_capacity = node.instance_index < self.spare_agents
+        # else
+
       
         if busy_list and not under_utilized:
             if node.unschedulable:
@@ -293,8 +298,8 @@ class Cluster(object):
                 state = ClusterNodeState.BUSY
         elif pods_to_schedule and not node.unschedulable:
             state = ClusterNodeState.POD_PENDING
-        elif spare_capacity:
-            state = ClusterNodeState.SPARE_AGENT    
+        # elif spare_capacity:
+        #     state = ClusterNodeState.SPARE_AGENT    
         elif under_utilized and (busy_list or not node.unschedulable):          
             if drainable:
                 state = ClusterNodeState.UNDER_UTILIZED_DRAINABLE
@@ -365,7 +370,8 @@ class Cluster(object):
             nodes = pool.nodes.copy()
             nodes.reverse()
             #flag used to notify that we don't want to delete/drain/cordon further, but we still want to display the state of each node
-            trim_ended = False 
+            trim_ended = False
+            nodes_to_delete = [] 
             for node in nodes:
                 state = self.get_node_state(
                     node, pods_by_node.get(node.name, []), pods_to_schedule)
@@ -374,7 +380,7 @@ class Cluster(object):
 
                 #With ACS, if we don't want to break the SLA, we can only kill nodes starting by the most recent
                 #With acs-engine, we can directly delete any node using Azure API
-                if trim_ended and not container_service.is_acs_engine:
+                if trim_ended and not self.is_acs_engine:
                     continue
 
                 #DataDog
@@ -388,7 +394,7 @@ class Cluster(object):
                             ClusterNodeState.SPARE_AGENT):                       
                     # do nothing
                     trim_ended = True
-                elif state == ClusterNodeState.UNDER_UTILIZED_DRAINABLE and (not trim_ended or container_service.is_acs_engine):
+                elif state == ClusterNodeState.UNDER_UTILIZED_DRAINABLE and (not trim_ended or self.is_acs_engine):
                     if not self.dry_run:
                         node.cordon()
                         node.drain(pods_by_node.get(node.name, []),
@@ -412,8 +418,9 @@ class Cluster(object):
                     # remove it from asg
                     if not self.dry_run:
                         nodes_to_trim += 1
-                        if container_service.is_acs_engine:
-                            container_service.delete_node(node)
+                    if self.is_acs_engine:
+                        # container_service.delete_node(node)
+                        nodes_to_delete.append(node)
                     else:
                         logger.info('[Dry run] Would have scaled in %s', node)
                 elif state == ClusterNodeState.UNDER_UTILIZED_UNDRAINABLE:
@@ -422,6 +429,22 @@ class Cluster(object):
                 else:
                     raise Exception("Unhandled state: {}".format(state))
             trim_map[pool.name] = nodes_to_trim
+            
+            if self.is_acs_engine:
+                nb_to_delete = pool.actual_capacity - self.spare_agents
+                if nb_to_delete > 0:
+                    i = 0
+                    for node in nodes_to_delete:
+                        if i <= nb_to_delete:
+                            if not self.dry_run:
+                                container_service.delete_node(node)
+                            else:
+                                logger.info('[Dry run] Would have deleted node %s', node.name)
+                        else:
+                            logger.info('Keeping node %s as a spare agent', node.name)       
+                         
         
-        if not container_service.is_acs_engine and len(list(filter(lambda x: trim_map[x] > 0, trim_map))) > 0:
+        if not self.is_acs_engine and len(list(filter(lambda x: trim_map[x] > 0, trim_map))) > 0:
             container_service.scale_down(trim_map, self.dry_run)
+        
+        
